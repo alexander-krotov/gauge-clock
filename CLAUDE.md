@@ -8,8 +8,15 @@ Single-sketch Arduino project (`Gauge-clock/Gauge-clock.ino`) for an ESP32-based
 values (e.g. temperature/pressure/time) on analog voltmeter gauges. It drives a 4-channel DAC
 (MCP4728) to position voltmeter needles and reads ambient conditions from an AHT20 (temperature/
 humidity) and a BMP280 (temperature/pressure) sensor, all over I2C. A DS3231 RTC provides the
-time-of-day: since the sketch has no WiFi/NTP, `get_time_from_rtc()` reads the RTC once at startup
-and seeds the ESP32's system clock (via `settimeofday()`) that `loop()` reads from thereafter.
+time-of-day: `get_time_from_rtc()` reads the RTC at startup and seeds the ESP32's system clock (via
+`settimeofday()`) that `loop()` reads from thereafter.
+
+The sketch also connects to WiFi (via `WiFiManager`, falling back to an on-device "GaugeClock"
+config AP if no saved credentials work) and, when connected, periodically syncs time from an NTP
+server (`getNtpTime()`, adapted from the Arduino `TimeNTP` example) and writes it back to the
+DS3231 so the RTC stays correct across power loss. A `GyverPortal` web UI (`build()`/`action()`)
+lets you set the timezone offset, toggle NTP/RTC use, change the NTP server, and set the time by
+hand; settings are persisted to EEPROM (`read_eeprom_data()`/`write_eeprom_data()`).
 
 The target is the ESP32 Arduino core specifically (not vanilla AVR Arduino): note the two-argument
 `Wire.begin(SDA_PIN, SCL_PIN)` call and use of `log_printf`, both ESP32-core-specific APIs. I2C pins
@@ -26,6 +33,10 @@ Arduino libraries (install via Arduino IDE Library Manager or `arduino-cli lib i
 - `Adafruit_BMP280`
 - `Adafruit_AHTX0` (pulls in `Adafruit_Sensor` / `Adafruit_BusIO`)
 - `DS3231` (NorthernWidget/Andrew Wickert library, header `DS3231.h`)
+- `WiFiManager` (tzapu) — captive-portal WiFi provisioning
+- `GyverPortal` — web-based configuration UI
+- `TimeLib` — only used for the `SECS_PER_HOUR` constant in NTP timezone math
+- `EEPROM` and `WiFiUdp` ship with the ESP32 Arduino core, no separate install needed
 
 ## Build
 
@@ -47,6 +58,13 @@ Everything lives in `Gauge-clock.ino`:
   real value — this counteracts mechanical momentum/overshoot in the analog gauge's needle. Preserve this
   behavior when touching `set_value()`.
 - `setup()` brings up I2C, the DAC, and both sensors, halting in an infinite `delay` loop if any device
-  fails `begin()`.
-- `loop()` currently exercises channel A through a sweep as a placeholder/test pattern, then reads and
-  logs sensor values every ~4000 loop iterations (`delay(10)` per iteration, so roughly every ~40s).
+  fails `begin()`; it also loads settings from EEPROM, syncs time from the DS3231, connects to WiFi via
+  `initialize_network()`, and starts the `GyverPortal` web UI.
+- `loop()` reads the system clock (seeded from the DS3231/NTP) each iteration to drive the hour/minute/
+  second gauges, periodically resyncs from NTP (`NTP_UPDATE_INTERVAL` seconds), ticks the web portal
+  (`ui.tick()`), and every ~100 iterations reads and logs sensor values (`delay(100)` per iteration, so
+  roughly every ~10s).
+- `getNtpTime()`/`sendNTPpacket()` implement the NTP client (adapted from the Arduino `TimeNTP` sample);
+  a successful sync updates both the DS3231 and the system clock.
+- `build()`/`action()` define and handle the `GyverPortal` config forms: timezone shift, NTP/RTC use
+  toggles, NTP server name, and manual time entry, all served from `setup()`'s `ui.start()`.

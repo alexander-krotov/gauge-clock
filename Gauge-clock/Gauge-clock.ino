@@ -13,6 +13,8 @@
 static const int SDA_PIN = 8;
 static const int SCL_PIN = 9;
 
+#define WIRE_SPEED 100000
+
 // NTP update interval in seconds
 const int NTP_UPDATE_INTERVAL = 3000;
 
@@ -38,6 +40,17 @@ unsigned char clock_use_rtc = true;  // Use RTC switch
 const MCP4728_channel_t gauge_1 = MCP4728_CHANNEL_C;  // Upper gauge (Hours)
 const MCP4728_channel_t gauge_2 = MCP4728_CHANNEL_A;  // Mid gauge (Minutes)
 const MCP4728_channel_t gauge_3 = MCP4728_CHANNEL_B;  // Lowest gague (Seconds, Temp, Pressure, Humidity)
+
+// Per-gauge needle corrections (persisted to EEPROM), passed to
+// GaugeDisplay::set_correction(). Compensate for mechanical differences
+// between individual gauges. Defaults match the original hard-coded values.
+int gauge_correction_1 = 3700;
+int gauge_correction_2 = 3450;
+int gauge_correction_3 = 4096;
+
+// EEPROM address of the gauge corrections, placed right after the NTP
+// server name field written by read/write_eeprom_data().
+const int eeprom_correction_addr = eeprom_addr + 3 + sizeof(ntpServerName);
 
 // Our fake TZ.
 // It does not relly work in ESP32 environment, but still needed for the standard
@@ -161,6 +174,18 @@ void read_eeprom_data()
   clock_use_ntp = EEPROM.read(eeprom_addr+1);
   clock_use_rtc = EEPROM.read(eeprom_addr+2);
   EEPROM.readString(eeprom_addr+3, ntpServerName, sizeof(ntpServerName)-1);
+
+  int c1, c2, c3;
+  EEPROM.get(eeprom_correction_addr, c1);
+  EEPROM.get(eeprom_correction_addr+sizeof(c1), c2);
+  EEPROM.get(eeprom_correction_addr+2*sizeof(c1), c3);
+
+  // Corrections must be positive and fit the 12-bit DAC range; reject
+  // uninitialized (erased) EEPROM contents and keep the code defaults.
+  if (c1>0 && c1<=4096) gauge_correction_1 = c1;
+  if (c2>0 && c2<=4096) gauge_correction_2 = c2;
+  if (c3>0 && c3<=4096) gauge_correction_3 = c3;
+
   EEPROM.commit();
 }
 
@@ -171,6 +196,11 @@ void write_eeprom_data()
   EEPROM.write(eeprom_addr+1, clock_use_ntp);
   EEPROM.write(eeprom_addr+2, clock_use_rtc);
   EEPROM.writeString(eeprom_addr+3, ntpServerName);
+
+  EEPROM.put(eeprom_correction_addr, gauge_correction_1);
+  EEPROM.put(eeprom_correction_addr+sizeof(gauge_correction_1), gauge_correction_2);
+  EEPROM.put(eeprom_correction_addr+2*sizeof(gauge_correction_1), gauge_correction_3);
+
   EEPROM.commit();
 }
 
@@ -260,6 +290,14 @@ void build()
     GP_MAKE_BOX(GP.LABEL("Use RTC"); GP.SWITCH("clock_use_rtc", clock_use_rtc ? true: false, 0););
     GP_MAKE_BOX(GP.LABEL("NTP Server name: "); GP.TEXT("clock_ntp_server", "local NTP server if you have", ntpServerName, "", sizeof(ntpServerName)-1););
   );
+
+  GP_MAKE_BLOCK_TAB(
+    "Gauge corrections",
+    GP_MAKE_BOX(GP.LABEL("Gauge 1 (Hours):"); GP.NUMBER("gauge_correction_1", "", gauge_correction_1););
+    GP_MAKE_BOX(GP.LABEL("Gauge 2 (Minutes):"); GP.NUMBER("gauge_correction_2", "", gauge_correction_2););
+    GP_MAKE_BOX(GP.LABEL("Gauge 3 (Seconds):"); GP.NUMBER("gauge_correction_3", "", gauge_correction_3););
+  );
+
   GP.SUBMIT("UPDATE");
 
   GP.FORM_END();
@@ -323,6 +361,26 @@ void action(GyverPortal& p)
       strncpy(ntpServerName, s.c_str(), sizeof(ntpServerName)-1);
     }
 
+    // Read the new gauge corrections, and check them for sanity.
+    n = ui.getInt("gauge_correction_1");
+    if (n>0 && n<=4096) {
+      gauge_correction_1 = n;
+    }
+
+    n = ui.getInt("gauge_correction_2");
+    if (n>0 && n<=4096) {
+      gauge_correction_2 = n;
+    }
+
+    n = ui.getInt("gauge_correction_3");
+    if (n>0 && n<=4096) {
+      gauge_correction_3 = n;
+    }
+
+    disp.set_correction(gauge_1, gauge_correction_1);
+    disp.set_correction(gauge_2, gauge_correction_2);
+    disp.set_correction(gauge_3, gauge_correction_3);
+
     // Save new settings to EEPROM
     write_eeprom_data();
 
@@ -352,7 +410,7 @@ void action(GyverPortal& p)
 
 void setup() {
   delay(1000);
-  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.begin(SDA_PIN, SCL_PIN, WIRE_SPEED);
 
   log_printf("Setup start\n");
 
@@ -386,9 +444,9 @@ void setup() {
 
   log_printf("DAC enabled\n");
 
-  disp.set_correction(gauge_1, 3700);
-  disp.set_correction(gauge_2, 3450);
-  disp.set_correction(gauge_3, 4096);
+  disp.set_correction(gauge_1, gauge_correction_1);
+  disp.set_correction(gauge_2, gauge_correction_2);
+  disp.set_correction(gauge_3, gauge_correction_3);
 
   // Initialize network and web configuration UI
   if (initialize_network()) {
@@ -442,15 +500,21 @@ void loop()
   if (count++ == 100) {
     sensors_event_t humidity, temp;
     aht20.getEvent(&humidity, &temp); // populate temp and humidity objects with fresh data
-    log_printf("T: %f\n", temp.temperature);
+    log_printf("ATH T: %f\n", temp.temperature);
     log_printf("H: %f\n", humidity.relative_humidity);
 
     float temperature = bmp.readTemperature();
     float pressure = bmp.readPressure();
 
-    log_printf("T: %f\n", temperature);
+    log_printf("BMP T: %f\n", temperature);
     log_printf("P: %f\n", pressure);
     count = 0;
+
+    temperature = myRTC.getTemperature();
+    bool h12, pm_time;
+    log_printf("RTC T: %f\n", temperature);
+    log_printf("RCT Time: %d:%02d:%02d\n", myRTC.getHour(h12, pm_time), myRTC.getMinute(), myRTC.getSecond());
+
     log_printf("Time: %f %f %f\n", h, m, s);
   }
 }

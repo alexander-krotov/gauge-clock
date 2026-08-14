@@ -39,7 +39,7 @@ unsigned char clock_use_rtc = true;  // Use RTC switch
 
 const MCP4728_channel_t gauge_1 = MCP4728_CHANNEL_C;  // Upper gauge (Hours)
 const MCP4728_channel_t gauge_2 = MCP4728_CHANNEL_A;  // Mid gauge (Minutes)
-const MCP4728_channel_t gauge_3 = MCP4728_CHANNEL_B;  // Lowest gague (Seconds, Temp, Pressure, Humidity)
+const MCP4728_channel_t gauge_3 = MCP4728_CHANNEL_B;  // Lowest gauge (Seconds, Temp, Pressure, Humidity)
 
 // Per-gauge needle corrections (persisted to EEPROM), passed to
 // GaugeDisplay::set_correction(). Compensate for mechanical differences
@@ -53,7 +53,7 @@ int gauge_correction_3 = 4096;
 const int eeprom_correction_addr = eeprom_addr + 3 + sizeof(ntpServerName);
 
 // Our fake TZ.
-// It does not relly work in ESP32 environment, but still needed for the standard
+// It does not really work in ESP32 environment, but still needed for the standard
 // functions as a parameter.
 struct timezone tz = {0, 0};
 
@@ -102,23 +102,26 @@ public:
     if (count<0) {
       count = 0;
     } else if (count>=4094) {
-       count = 4095;
+      count = 4095;
     }
 
-    while (count+step>=current_value[g]) {
+    // ramp up
+    while (current_value[g] + step <= count) {
       current_value[g] += step;
       mcp.setChannelValue(g, current_value[g], MCP4728_VREF_INTERNAL);
       delay(1);
     }
   
-    while (count<current_value[g]-step) {
+    // ramp down
+    while (current_value[g] - step >= count) {
       current_value[g] -= step;
       mcp.setChannelValue(g, current_value[g], MCP4728_VREF_INTERNAL);
       delay(1);
     }
   
-    mcp.setChannelValue(g, count, MCP4728_VREF_INTERNAL);
+    // final set to exact value
     current_value[g] = count;
+    mcp.setChannelValue(g, current_value[g], MCP4728_VREF_INTERNAL);
 
     return count;
   }
@@ -130,13 +133,30 @@ void set_clock_time(unsigned int h, unsigned int m, unsigned int s)
 {
   log_printf("set time: %02u:%02u:%02u\n", h, m, s);
 
-  // Check time sanity. Uninitialized RTC might give strange values.
-  if (h<24 && m<60 && s<60) {
-    struct timeval tv = {0};
-    tv.tv_sec = h*60*60+m*60+s;
-    // Set current time
-    settimeofday(&tv, &tz);
+  // Check time values sanity. Uninitialized RTC or broken GPS read
+  // seen to produce nonsense time.
+  if (h >= 24 || m >= 60 || s >= 60) {
+    return;
   }
+
+  time_t now = time(nullptr);
+  struct tm tm_now;
+  if (localtime_r(&now, &tm_now) == nullptr) {
+     log_printf("mktime() failed when reding time\n");
+     return;
+  }
+  tm_now.tm_hour = h;
+  tm_now.tm_min  = m;
+  tm_now.tm_sec  = s;
+  time_t newt = mktime(&tm_now);
+  if (newt == (time_t)-1) {
+    log_printf("mktime() failed when setting time\n");
+    return;
+  }
+  struct timeval tv;
+  tv.tv_sec = newt;
+  tv.tv_usec = 0;
+  settimeofday(&tv, &tz);
 }
 
 void get_time_from_rtc()
@@ -252,20 +272,18 @@ time_t getNtpTime()
       secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
       secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
       secsSince1900 |= (unsigned long)packetBuffer[43];
-      // Convert NTP time to UNIX time and apply timezone offset
-      secsSince1900 = secsSince1900 - 2208988800UL + clock_tz * SECS_PER_HOUR;
-
       log_printf("Receive NTP Response %lu\n", (unsigned long)secsSince1900);
 
-      // Update RTC and system time with received NTP time
-      tm *ttm = localtime(&secsSince1900);
-      myRTC.setSecond(ttm->tm_sec);
-      myRTC.setMinute(ttm->tm_min);
-      myRTC.setHour(ttm->tm_hour);
+      // Convert NTP time to UNIX time and apply timezone offset
+      time_t secsSinceEpoch = secsSince1900 - 2208988800UL + clock_tz * SECS_PER_HOUR;
 
+      // Update RTC and system time with received NTP time
+      myRTC.setEpoch(secsSinceEpoch, true);
+
+      tm *ttm = localtime(&secsSinceEpoch);
       set_clock_time(ttm->tm_hour, ttm->tm_min, ttm->tm_sec);
 
-      return secsSince1900;
+      return secsSinceEpoch;
     }
   }
   log_printf("No NTP Response :-(\n");
@@ -408,7 +426,8 @@ void action(GyverPortal& p)
   }
 }
 
-void setup() {
+void setup()
+{
   delay(1000);
   Wire.begin(SDA_PIN, SCL_PIN, WIRE_SPEED);
 
@@ -467,54 +486,57 @@ void setup() {
   }
 }
 
+// Read the clock sensors.
+void read_sensors()
+{
+  sensors_event_t humidity, temp;
+  aht20.getEvent(&humidity, &temp); // populate temp and humidity objects with fresh data
+  log_printf("ATH T: %f\n", temp.temperature);
+  log_printf("H: %f\n", humidity.relative_humidity);
+
+  float temperature = bmp.readTemperature();
+  float pressure = bmp.readPressure();
+
+  log_printf("BMP T: %f\n", temperature);
+  log_printf("P: %f\n", pressure);
+
+  temperature = myRTC.getTemperature();
+  bool h12, pm_time;
+  log_printf("RTC T: %f\n", temperature);
+  log_printf("RCT Time: %d:%02d:%02d\n", myRTC.getHour(h12, pm_time), myRTC.getMinute(), myRTC.getSecond());
+}
+
 void loop()
 {
-  static int count = 0;
   struct timeval tv;
   gettimeofday(&tv, &tz);
-  tm *ttm = localtime(&tv.tv_sec);
 
   // Periodically resync from NTP, once per NTP_UPDATE_INTERVAL seconds.
-  {
-    static time_t last_sec;
-    if (last_sec != tv.tv_sec) {
-      last_sec = tv.tv_sec;
-      if (clock_use_ntp && tv.tv_sec%NTP_UPDATE_INTERVAL==0) {
-        getNtpTime();
-      }
-    }
+  static time_t last_ntp_sync;
+  if (clock_use_ntp && (tv.tv_sec - last_ntp_sync) >= NTP_UPDATE_INTERVAL) {
+    last_ntp_sync = tv.tv_sec;
+    getNtpTime();
   }
 
   // Web UI tick.
   ui.tick();
 
+  // Read time and set the floating-point time values.
+  tm *ttm = localtime(&tv.tv_sec);
   double s = (ttm->tm_sec%60)+double(tv.tv_usec)/1000000;
   double m = ttm->tm_min+s/60;
   double h = (ttm->tm_hour%12)+m/60;
 
+  // Update the display.
   disp.set_value(gauge_1, h);
   disp.set_value(gauge_2, m);
   disp.set_value(gauge_3, s);
   delay(100);
 
+  static int count = 0;
   if (count++ == 100) {
-    sensors_event_t humidity, temp;
-    aht20.getEvent(&humidity, &temp); // populate temp and humidity objects with fresh data
-    log_printf("ATH T: %f\n", temp.temperature);
-    log_printf("H: %f\n", humidity.relative_humidity);
-
-    float temperature = bmp.readTemperature();
-    float pressure = bmp.readPressure();
-
-    log_printf("BMP T: %f\n", temperature);
-    log_printf("P: %f\n", pressure);
-    count = 0;
-
-    temperature = myRTC.getTemperature();
-    bool h12, pm_time;
-    log_printf("RTC T: %f\n", temperature);
-    log_printf("RCT Time: %d:%02d:%02d\n", myRTC.getHour(h12, pm_time), myRTC.getMinute(), myRTC.getSecond());
-
     log_printf("Time: %f %f %f\n", h, m, s);
+    read_sensors();
+    count = 0;
   }
 }

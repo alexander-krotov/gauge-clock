@@ -66,6 +66,15 @@ signed char clock_tz = 2; // Timezone shift (could be negative)
 unsigned char clock_use_ntp = true;  // Use NTP switch
 unsigned char clock_use_rtc = true;  // Use RTC switch
 
+// What gauge_3 displays (persisted to EEPROM), selectable via the web UI.
+enum Gauge3Mode {
+  GAUGE3_SECONDS = 0,
+  GAUGE3_TEMPERATURE = 1,
+  GAUGE3_HUMIDITY = 2,
+  GAUGE3_PRESSURE = 3,
+};
+unsigned char gauge_3_mode = GAUGE3_SECONDS;
+
 // Per-gauge needle corrections (persisted to EEPROM), passed to
 // GaugeDisplay::set_correction(). Compensate for mechanical differences
 // between individual gauges. Defaults match the original hard-coded values.
@@ -87,6 +96,33 @@ const int eeprom_correction_addr = eeprom_addr + 3 + sizeof(ntpServerName);
 // EEPROM address of the LED brightness, placed right after the gauge
 // corrections written by read/write_eeprom_data().
 const int eeprom_led_brightness_addr = eeprom_correction_addr + 3*sizeof(gauge_correction_1);
+
+// EEPROM address of the gauge_3 display mode, placed right after the LED
+// brightness written by read/write_eeprom_data().
+const int eeprom_gauge_3_mode_addr = eeprom_led_brightness_addr + sizeof(led_brightness);
+
+// Indicator LEDs, one per gauge_3 mode, showing which value gauge_3 currently displays.
+const int LED_GAUGE3_SECONDS = 0;
+const int LED_GAUGE3_HUMIDITY = 1;
+const int LED_GAUGE3_PRESSURE = 2;
+const int LED_GAUGE3_TEMPERATURE = 3;
+
+// Light the LED for the current gauge_3_mode white, at led_brightness. Leaves
+// other LEDs untouched, so call after leds_on_orange(), which clears the strip.
+void leds_indicate_gauge3_mode()
+{
+  int idx;
+  switch (gauge_3_mode) {
+    case GAUGE3_HUMIDITY:    idx = LED_GAUGE3_HUMIDITY;    break;
+    case GAUGE3_PRESSURE:    idx = LED_GAUGE3_PRESSURE;    break;
+    case GAUGE3_TEMPERATURE: idx = LED_GAUGE3_TEMPERATURE; break;
+    case GAUGE3_SECONDS:
+    default:                 idx = LED_GAUGE3_SECONDS;     break;
+  }
+  leds.setBrightness(led_brightness);
+  leds.setPixelColor(idx, leds.Color(255, 255, 255));
+  leds.show();
+}
 
 // Our fake TZ.
 // It does not really work in ESP32 environment, but still needed for the standard
@@ -164,6 +200,32 @@ public:
 };
 
 GaugeDisplay disp;
+
+// Latest sensor readings, refreshed by read_sensors() and used to drive
+// gauge_3 when it is not showing seconds.
+float sensor_temperature = 0; // Celsius, from the AHT20
+float sensor_humidity = 0;    // %RH, from the AHT20
+float sensor_pressure = 0;    // mmHg, from the BMP280
+
+// Set the value range for gauge_3 to match what it currently displays.
+void set_gauge3_range()
+{
+  switch (gauge_3_mode) {
+    case GAUGE3_TEMPERATURE:
+      disp.set_range(gauge_3, 15, 35); // Celsius
+      break;
+    case GAUGE3_HUMIDITY:
+      disp.set_range(gauge_3, 0, 100); // %RH
+      break;
+    case GAUGE3_PRESSURE:
+      disp.set_range(gauge_3, 735, 780); // mmHg
+      break;
+    case GAUGE3_SECONDS:
+    default:
+      disp.set_range(gauge_3, 0, 60);
+      break;
+  }
+}
 
 void set_clock_time(unsigned int h, unsigned int m, unsigned int s)
 {
@@ -244,6 +306,9 @@ void read_eeprom_data()
 
   led_brightness = EEPROM.read(eeprom_led_brightness_addr);
 
+  unsigned char m = EEPROM.read(eeprom_gauge_3_mode_addr);
+  if (m<=GAUGE3_PRESSURE) gauge_3_mode = m;
+
   EEPROM.commit();
 }
 
@@ -260,6 +325,8 @@ void write_eeprom_data()
   EEPROM.put(eeprom_correction_addr+2*sizeof(gauge_correction_1), gauge_correction_3);
 
   EEPROM.write(eeprom_led_brightness_addr, led_brightness);
+
+  EEPROM.write(eeprom_gauge_3_mode_addr, gauge_3_mode);
 
   EEPROM.commit();
 }
@@ -353,7 +420,8 @@ void build()
     "Gauge corrections",
     GP_MAKE_BOX(GP.LABEL("Gauge 1 (Hours):"); GP.NUMBER("gauge_correction_1", "", gauge_correction_1););
     GP_MAKE_BOX(GP.LABEL("Gauge 2 (Minutes):"); GP.NUMBER("gauge_correction_2", "", gauge_correction_2););
-    GP_MAKE_BOX(GP.LABEL("Gauge 3 (Seconds):"); GP.NUMBER("gauge_correction_3", "", gauge_correction_3););
+    GP_MAKE_BOX(GP.LABEL("Gauge 3:"); GP.NUMBER("gauge_correction_3", "", gauge_correction_3););
+    GP_MAKE_BOX(GP.LABEL("Gauge 3 shows:"); GP.SELECT("gauge_3_mode", "Seconds,Temperature,Humidity,Pressure", gauge_3_mode););
   );
 
   GP_MAKE_BLOCK_TAB(
@@ -445,11 +513,18 @@ void action(GyverPortal& p)
       led_brightness = n;
     }
 
+    n = ui.getInt("gauge_3_mode");
+    if (n>=0 && n<=GAUGE3_PRESSURE) {
+      gauge_3_mode = n;
+    }
+
     disp.set_correction(gauge_1, gauge_correction_1);
     disp.set_correction(gauge_2, gauge_correction_2);
     disp.set_correction(gauge_3, gauge_correction_3);
+    set_gauge3_range();
 
     leds_on_orange();
+    leds_indicate_gauge3_mode();
 
     // Save new settings to EEPROM
     write_eeprom_data();
@@ -490,6 +565,7 @@ void setup()
 
   leds.begin();
   leds_on_orange();
+  leds_indicate_gauge3_mode();
 
   // Set time from RTC
   get_time_from_rtc();
@@ -504,7 +580,7 @@ void setup()
 
   disp.set_range(gauge_1, 0, 12); // Scale 12 hours
   disp.set_range(gauge_2, 0, 60); // Scale 60 minutes
-  disp.set_range(gauge_3, 0, 60); // Scale 60 seconds
+  set_gauge3_range();
 
   if (!aht20.begin()) {
     Serial.println("AHT20 not detected. Please check wiring. Freezing.");
@@ -517,6 +593,8 @@ void setup()
   }
 
   log_printf("DAC enabled\n");
+
+  read_sensors(); // Populate initial sensor readings for gauge_3
 
   disp.set_correction(gauge_1, gauge_correction_1);
   disp.set_correction(gauge_2, gauge_correction_2);
@@ -549,11 +627,14 @@ void read_sensors()
   log_printf("ATH T: %f\n", temp.temperature);
   log_printf("H: %f\n", humidity.relative_humidity);
 
+  sensor_temperature = temp.temperature;
+  sensor_humidity = humidity.relative_humidity;
+  sensor_pressure = bmp.readPressure() * 0.00750062; // Pa -> mmHg
+
   float temperature = bmp.readTemperature();
-  float pressure = bmp.readPressure();
 
   log_printf("BMP T: %f\n", temperature);
-  log_printf("P: %f\n", pressure);
+  log_printf("P: %f\n", sensor_pressure);
 
   temperature = myRTC.getTemperature();
   bool h12, pm_time;
@@ -585,7 +666,22 @@ void loop()
   // Update the display.
   disp.set_value(gauge_1, h);
   disp.set_value(gauge_2, m);
-  disp.set_value(gauge_3, s);
+
+  switch (gauge_3_mode) {
+    case GAUGE3_TEMPERATURE:
+      disp.set_value(gauge_3, sensor_temperature);
+      break;
+    case GAUGE3_HUMIDITY:
+      disp.set_value(gauge_3, sensor_humidity);
+      break;
+    case GAUGE3_PRESSURE:
+      disp.set_value(gauge_3, sensor_pressure);
+      break;
+    case GAUGE3_SECONDS:
+    default:
+      disp.set_value(gauge_3, s);
+      break;
+  }
   delay(100);
 
   static int count = 0;

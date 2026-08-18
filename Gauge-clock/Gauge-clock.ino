@@ -9,9 +9,13 @@
 #include <TimeLib.h>
 #include <WiFiUdp.h>
 #include <GyverPortal.h>
+#include <Adafruit_NeoPixel.h>
 
 static const int SDA_PIN = 8;
 static const int SCL_PIN = 9;
+
+static const int LED_PIN = 20;
+static const int LED_COUNT = 10;
 
 #define WIRE_SPEED 100000
 
@@ -31,15 +35,36 @@ DS3231 myRTC;
 // Web configuration UI
 GyverPortal ui;
 
+Adafruit_NeoPixel leds(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// LED strip brightness (0-255), persisted to EEPROM and settable via the web UI.
+unsigned char led_brightness = 128;
+
+const int LED_ORANGE_COUNT = 6; // Number of LEDs lit by leds_on_orange()
+
+// Turn all LEDs off.
+void leds_off()
+{
+  leds.clear();
+  leds.show();
+}
+
+// Turn the first LED_ORANGE_COUNT LEDs on in orange, at led_brightness.
+void leds_on_orange()
+{
+  leds.setBrightness(led_brightness);
+  leds.clear();
+  for (int i = LED_COUNT-LED_ORANGE_COUNT; i < LED_COUNT; i++) {
+    leds.setPixelColor(i, leds.Color(255, 80, 0));
+  }
+  leds.show();
+}
+
 // Clock global configuration (persisted to EEPROM).
 char ntpServerName[80] = "fi.pool.ntp.org";
 signed char clock_tz = 2; // Timezone shift (could be negative)
 unsigned char clock_use_ntp = true;  // Use NTP switch
 unsigned char clock_use_rtc = true;  // Use RTC switch
-
-const MCP4728_channel_t gauge_1 = MCP4728_CHANNEL_C;  // Upper gauge (Hours)
-const MCP4728_channel_t gauge_2 = MCP4728_CHANNEL_A;  // Mid gauge (Minutes)
-const MCP4728_channel_t gauge_3 = MCP4728_CHANNEL_B;  // Lowest gauge (Seconds, Temp, Pressure, Humidity)
 
 // Per-gauge needle corrections (persisted to EEPROM), passed to
 // GaugeDisplay::set_correction(). Compensate for mechanical differences
@@ -48,9 +73,20 @@ int gauge_correction_1 = 3700;
 int gauge_correction_2 = 3450;
 int gauge_correction_3 = 4096;
 
+// MCP4728 constants --------------------------------------------------------
+static const int GAUGE_MAX = 4095; // Max value accepted by External DAC
+
+const MCP4728_channel_t gauge_1 = MCP4728_CHANNEL_C;  // Upper gauge (Hours)
+const MCP4728_channel_t gauge_2 = MCP4728_CHANNEL_A;  // Mid gauge (Minutes)
+const MCP4728_channel_t gauge_3 = MCP4728_CHANNEL_B;  // Lowest gauge (Seconds, Temp, Pressure, Humidity)
+
 // EEPROM address of the gauge corrections, placed right after the NTP
 // server name field written by read/write_eeprom_data().
 const int eeprom_correction_addr = eeprom_addr + 3 + sizeof(ntpServerName);
+
+// EEPROM address of the LED brightness, placed right after the gauge
+// corrections written by read/write_eeprom_data().
+const int eeprom_led_brightness_addr = eeprom_correction_addr + 3*sizeof(gauge_correction_1);
 
 // Our fake TZ.
 // It does not really work in ESP32 environment, but still needed for the standard
@@ -62,7 +98,7 @@ class GaugeDisplay {
 
   int low_value[4];
   int higher_value[4];
-  int correction[4] = {4096, 4096, 4096, 4096};
+  int correction[4] = {GAUGE_MAX+1, GAUGE_MAX+1, GAUGE_MAX+1, GAUGE_MAX+1};
   int current_value[4];
 
 public:
@@ -87,7 +123,7 @@ public:
     higher_value[g] = high;
   }
 
-  void set_correction(int gauge_number, int correction = 4096)
+  void set_correction(int gauge_number, int correction = GAUGE_MAX+1)
   {
     this->correction[gauge_number] = correction;
   }
@@ -101,8 +137,8 @@ public:
 
     if (count<0) {
       count = 0;
-    } else if (count>=4094) {
-      count = 4095;
+    } else if (count>=GAUGE_MAX) {
+      count = GAUGE_MAX;
     }
 
     // ramp up
@@ -202,9 +238,11 @@ void read_eeprom_data()
 
   // Corrections must be positive and fit the 12-bit DAC range; reject
   // uninitialized (erased) EEPROM contents and keep the code defaults.
-  if (c1>0 && c1<=4096) gauge_correction_1 = c1;
-  if (c2>0 && c2<=4096) gauge_correction_2 = c2;
-  if (c3>0 && c3<=4096) gauge_correction_3 = c3;
+  if (c1>0 && c1<=GAUGE_MAX) gauge_correction_1 = c1;
+  if (c2>0 && c2<=GAUGE_MAX) gauge_correction_2 = c2;
+  if (c3>0 && c3<=GAUGE_MAX) gauge_correction_3 = c3;
+
+  led_brightness = EEPROM.read(eeprom_led_brightness_addr);
 
   EEPROM.commit();
 }
@@ -220,6 +258,8 @@ void write_eeprom_data()
   EEPROM.put(eeprom_correction_addr, gauge_correction_1);
   EEPROM.put(eeprom_correction_addr+sizeof(gauge_correction_1), gauge_correction_2);
   EEPROM.put(eeprom_correction_addr+2*sizeof(gauge_correction_1), gauge_correction_3);
+
+  EEPROM.write(eeprom_led_brightness_addr, led_brightness);
 
   EEPROM.commit();
 }
@@ -316,6 +356,11 @@ void build()
     GP_MAKE_BOX(GP.LABEL("Gauge 3 (Seconds):"); GP.NUMBER("gauge_correction_3", "", gauge_correction_3););
   );
 
+  GP_MAKE_BLOCK_TAB(
+    "LEDs",
+    GP_MAKE_BOX(GP.LABEL("LED brightness (0-255):"); GP.NUMBER("led_brightness", "", led_brightness););
+  );
+
   GP.SUBMIT("UPDATE");
 
   GP.FORM_END();
@@ -381,23 +426,30 @@ void action(GyverPortal& p)
 
     // Read the new gauge corrections, and check them for sanity.
     n = ui.getInt("gauge_correction_1");
-    if (n>0 && n<=4096) {
+    if (n>0 && n<=GAUGE_MAX) {
       gauge_correction_1 = n;
     }
 
     n = ui.getInt("gauge_correction_2");
-    if (n>0 && n<=4096) {
+    if (n>0 && n<=GAUGE_MAX) {
       gauge_correction_2 = n;
     }
 
     n = ui.getInt("gauge_correction_3");
-    if (n>0 && n<=4096) {
+    if (n>0 && n<=GAUGE_MAX) {
       gauge_correction_3 = n;
+    }
+
+    n = ui.getInt("led_brightness");
+    if (n>=0 && n<=255) {
+      led_brightness = n;
     }
 
     disp.set_correction(gauge_1, gauge_correction_1);
     disp.set_correction(gauge_2, gauge_correction_2);
     disp.set_correction(gauge_3, gauge_correction_3);
+
+    leds_on_orange();
 
     // Save new settings to EEPROM
     write_eeprom_data();
@@ -435,6 +487,9 @@ void setup()
 
   EEPROM.begin(100);
   read_eeprom_data();
+
+  leds.begin();
+  leds_on_orange();
 
   // Set time from RTC
   get_time_from_rtc();

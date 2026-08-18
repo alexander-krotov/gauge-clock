@@ -11,6 +11,10 @@ humidity) and a BMP280 (temperature/pressure) sensor, all over I2C. A DS3231 RTC
 time-of-day: `get_time_from_rtc()` reads the RTC at startup and seeds the ESP32's system clock (via
 `settimeofday()`) that `loop()` reads from thereafter.
 
+The sketch also drives 10 WS2812 addressable LEDs on pin `IO20` (`LED_PIN`) via `Adafruit_NeoPixel`,
+with `leds_off()`/`leds_on_orange(brightness)` helpers to switch them off or on in orange at a given
+brightness (0-255).
+
 The sketch also connects to WiFi (via `WiFiManager`, falling back to an on-device "GaugeClock"
 config AP if no saved credentials work) and, when connected, periodically syncs time from an NTP
 server (`getNtpTime()`, adapted from the Arduino `TimeNTP` example) and writes it back to the
@@ -33,6 +37,7 @@ Arduino libraries (install via Arduino IDE Library Manager or `arduino-cli lib i
 - `Adafruit_BMP280`
 - `Adafruit_AHTX0` (pulls in `Adafruit_Sensor` / `Adafruit_BusIO`)
 - `DS3231` (NorthernWidget/Andrew Wickert library, header `DS3231.h`)
+- `Adafruit_NeoPixel` — drives the WS2812 status LEDs
 - `WiFiManager` (tzapu) — captive-portal WiFi provisioning
 - `GyverPortal` — web-based configuration UI
 - `TimeLib` — only used for the `SECS_PER_HOUR` constant in NTP timezone math

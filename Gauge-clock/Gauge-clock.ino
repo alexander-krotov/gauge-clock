@@ -67,13 +67,28 @@ unsigned char clock_use_ntp = true;  // Use NTP switch
 unsigned char clock_use_rtc = true;  // Use RTC switch
 
 // What gauge_3 displays (persisted to EEPROM), selectable via the web UI.
+// GAUGE3_RANDOM cycles through the other modes automatically; see
+// gauge_3_random_submode below.
 enum Gauge3Mode {
   GAUGE3_SECONDS = 0,
   GAUGE3_TEMPERATURE = 1,
   GAUGE3_HUMIDITY = 2,
   GAUGE3_PRESSURE = 3,
+  GAUGE3_RANDOM = 4,
 };
 unsigned char gauge_3_mode = GAUGE3_SECONDS;
+
+// While gauge_3_mode is GAUGE3_RANDOM, this holds the mode currently being
+// shown, and gauge_3_random_switch_at (millis()) is when to pick a new one.
+unsigned char gauge_3_random_submode = GAUGE3_SECONDS;
+unsigned long gauge_3_random_switch_at = 0;
+
+// Returns the mode gauge_3 should actually display right now: gauge_3_mode
+// itself, or gauge_3_random_submode when in GAUGE3_RANDOM mode.
+unsigned char gauge3_effective_mode()
+{
+  return gauge_3_mode == GAUGE3_RANDOM ? gauge_3_random_submode : gauge_3_mode;
+}
 
 // Per-gauge needle corrections (persisted to EEPROM), passed to
 // GaugeDisplay::set_correction(). Compensate for mechanical differences
@@ -107,12 +122,12 @@ const int LED_GAUGE3_HUMIDITY = 1;
 const int LED_GAUGE3_PRESSURE = 2;
 const int LED_GAUGE3_TEMPERATURE = 3;
 
-// Light the LED for the current gauge_3_mode white, at led_brightness. Leaves
-// other LEDs untouched, so call after leds_on_orange(), which clears the strip.
+// Light the LED for what gauge_3 currently displays white, at led_brightness,
+// clearing the other indicator LEDs. Does not touch the other (orange) LEDs.
 void leds_indicate_gauge3_mode()
 {
   int idx;
-  switch (gauge_3_mode) {
+  switch (gauge3_effective_mode()) {
     case GAUGE3_HUMIDITY:    idx = LED_GAUGE3_HUMIDITY;    break;
     case GAUGE3_PRESSURE:    idx = LED_GAUGE3_PRESSURE;    break;
     case GAUGE3_TEMPERATURE: idx = LED_GAUGE3_TEMPERATURE; break;
@@ -120,7 +135,9 @@ void leds_indicate_gauge3_mode()
     default:                 idx = LED_GAUGE3_SECONDS;     break;
   }
   leds.setBrightness(led_brightness);
-  leds.setPixelColor(idx, leds.Color(255, 255, 255));
+  for (int i = 0; i < 4; i++) {
+    leds.setPixelColor(i, i == idx ? leds.Color(255, 255, 255) : 0);
+  }
   leds.show();
 }
 
@@ -210,7 +227,7 @@ float sensor_pressure = 0;    // mmHg, from the BMP280
 // Set the value range for gauge_3 to match what it currently displays.
 void set_gauge3_range()
 {
-  switch (gauge_3_mode) {
+  switch (gauge3_effective_mode()) {
     case GAUGE3_TEMPERATURE:
       disp.set_range(gauge_3, 15, 35); // Celsius
       break;
@@ -224,6 +241,35 @@ void set_gauge3_range()
     default:
       disp.set_range(gauge_3, 0, 60);
       break;
+  }
+}
+
+// Pick a new random gauge_3 submode (different from the current one),
+// schedule the next switch 10-30s from now, and apply the change. Only
+// meaningful while gauge_3_mode is GAUGE3_RANDOM.
+void gauge3_random_pick_and_apply()
+{
+  unsigned char choices[3];
+  int n = 0;
+  for (unsigned char cand = GAUGE3_SECONDS; cand <= GAUGE3_PRESSURE; cand++) {
+    if (cand != gauge_3_random_submode) choices[n++] = cand;
+  }
+  gauge_3_random_submode = choices[random(3)];
+  gauge_3_random_switch_at = millis() + random(10000, 30001);
+
+  set_gauge3_range();
+  leds_indicate_gauge3_mode();
+}
+
+// Apply the current gauge_3_mode: for GAUGE3_RANDOM this (re)picks a random
+// submode; otherwise it just applies the gauge range and LED indicator.
+void gauge3_apply_mode()
+{
+  if (gauge_3_mode == GAUGE3_RANDOM) {
+    gauge3_random_pick_and_apply();
+  } else {
+    set_gauge3_range();
+    leds_indicate_gauge3_mode();
   }
 }
 
@@ -307,7 +353,7 @@ void read_eeprom_data()
   led_brightness = EEPROM.read(eeprom_led_brightness_addr);
 
   unsigned char m = EEPROM.read(eeprom_gauge_3_mode_addr);
-  if (m<=GAUGE3_PRESSURE) gauge_3_mode = m;
+  if (m<=GAUGE3_RANDOM) gauge_3_mode = m;
 
   EEPROM.commit();
 }
@@ -421,7 +467,7 @@ void build()
     GP_MAKE_BOX(GP.LABEL("Gauge 1 (Hours):"); GP.NUMBER("gauge_correction_1", "", gauge_correction_1););
     GP_MAKE_BOX(GP.LABEL("Gauge 2 (Minutes):"); GP.NUMBER("gauge_correction_2", "", gauge_correction_2););
     GP_MAKE_BOX(GP.LABEL("Gauge 3:"); GP.NUMBER("gauge_correction_3", "", gauge_correction_3););
-    GP_MAKE_BOX(GP.LABEL("Gauge 3 shows:"); GP.SELECT("gauge_3_mode", "Seconds,Temperature,Humidity,Pressure", gauge_3_mode););
+    GP_MAKE_BOX(GP.LABEL("Gauge 3 shows:"); GP.SELECT("gauge_3_mode", "Seconds,Temperature,Humidity,Pressure,Random", gauge_3_mode););
   );
 
   GP_MAKE_BLOCK_TAB(
@@ -514,17 +560,16 @@ void action(GyverPortal& p)
     }
 
     n = ui.getInt("gauge_3_mode");
-    if (n>=0 && n<=GAUGE3_PRESSURE) {
+    if (n>=0 && n<=GAUGE3_RANDOM) {
       gauge_3_mode = n;
     }
 
     disp.set_correction(gauge_1, gauge_correction_1);
     disp.set_correction(gauge_2, gauge_correction_2);
     disp.set_correction(gauge_3, gauge_correction_3);
-    set_gauge3_range();
 
     leds_on_orange();
-    leds_indicate_gauge3_mode();
+    gauge3_apply_mode();
 
     // Save new settings to EEPROM
     write_eeprom_data();
@@ -565,7 +610,6 @@ void setup()
 
   leds.begin();
   leds_on_orange();
-  leds_indicate_gauge3_mode();
 
   // Set time from RTC
   get_time_from_rtc();
@@ -580,7 +624,7 @@ void setup()
 
   disp.set_range(gauge_1, 0, 12); // Scale 12 hours
   disp.set_range(gauge_2, 0, 60); // Scale 60 minutes
-  set_gauge3_range();
+  gauge3_apply_mode();
 
   if (!aht20.begin()) {
     Serial.println("AHT20 not detected. Please check wiring. Freezing.");
@@ -657,6 +701,11 @@ void loop()
   // Web UI tick.
   ui.tick();
 
+  // In random mode, periodically switch gauge_3 to a different value.
+  if (gauge_3_mode == GAUGE3_RANDOM && (long)(millis() - gauge_3_random_switch_at) >= 0) {
+    gauge3_random_pick_and_apply();
+  }
+
   // Read time and set the floating-point time values.
   tm *ttm = localtime(&tv.tv_sec);
   double s = (ttm->tm_sec%60)+double(tv.tv_usec)/1000000;
@@ -667,7 +716,7 @@ void loop()
   disp.set_value(gauge_1, h);
   disp.set_value(gauge_2, m);
 
-  switch (gauge_3_mode) {
+  switch (gauge3_effective_mode()) {
     case GAUGE3_TEMPERATURE:
       disp.set_value(gauge_3, sensor_temperature);
       break;

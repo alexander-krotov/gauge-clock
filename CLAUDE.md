@@ -22,15 +22,21 @@ DS3231 so the RTC stays correct across power loss. A `GyverPortal` web UI (`buil
 lets you set the timezone offset, toggle NTP/RTC use, change the NTP server, and set the time by
 hand; settings are persisted to EEPROM (`read_eeprom_data()`/`write_eeprom_data()`).
 
-The lowest gauge (`gauge_3`) can show seconds, temperature, humidity, or barometric pressure; which
-one is chosen via a `gauge_3_mode` select in the web UI (`Gauge3Mode` enum), persisted to EEPROM, and
-applied with `set_gauge3_range()` (sets the gauge's value range: 15-35°C, 0-100% RH, or 735-780 mmHg)
-alongside `loop()`'s per-mode `disp.set_value(gauge_3, ...)` call. Temperature/humidity readings come
-from the AHT20 and pressure from the BMP280 (converted from Pa to mmHg), cached in
-`sensor_temperature`/`sensor_humidity`/`sensor_pressure` by `read_sensors()`. `leds_indicate_gauge3_mode()`
-lights one of the first 4 WS2812 LEDs white (at `led_brightness`) to show which value gauge_3 is on:
-LED 0 = seconds, LED 1 = humidity, LED 2 = pressure, LED 3 = temperature; it runs after
-`leds_on_orange()` (in `setup()` and after a web UI settings update) since that call clears the strip.
+The lowest gauge (`gauge_3`) can show seconds, temperature, humidity, barometric pressure, or cycle
+through those at random; which one is chosen via a `gauge_3_mode` select in the web UI (`Gauge3Mode`
+enum), persisted to EEPROM, and applied with `set_gauge3_range()` (sets the gauge's value range:
+15-35°C, 0-100% RH, or 735-780 mmHg) alongside `loop()`'s per-mode `disp.set_value(gauge_3, ...)`
+call. Temperature/humidity readings come from the AHT20 and pressure from the BMP280 (converted from
+Pa to mmHg), cached in `sensor_temperature`/`sensor_humidity`/`sensor_pressure` by `read_sensors()`.
+In `GAUGE3_RANDOM` mode, `gauge3_random_pick_and_apply()` (called from `loop()` once the scheduled
+`gauge_3_random_switch_at` `millis()` deadline passes) picks a different one of the other four modes
+into `gauge_3_random_submode` and reschedules itself 10-30s out; `gauge3_effective_mode()` resolves
+what gauge_3 should actually show at any moment (the random submode, or `gauge_3_mode` itself when
+not random), and both `set_gauge3_range()` and `leds_indicate_gauge3_mode()` key off it.
+`leds_indicate_gauge3_mode()` lights one of the first 4 WS2812 LEDs white (at `led_brightness`) to
+show which value gauge_3 is on: LED 0 = seconds, LED 1 = humidity, LED 2 = pressure, LED 3 =
+temperature, clearing the other three each call; it runs after `leds_on_orange()` (in `setup()` and
+after a web UI settings update, via `gauge3_apply_mode()`) since that call clears the whole strip.
 
 The target is the ESP32 Arduino core specifically (not vanilla AVR Arduino): note the two-argument
 `Wire.begin(SDA_PIN, SCL_PIN)` call and use of `log_printf`, both ESP32-core-specific APIs. I2C pins

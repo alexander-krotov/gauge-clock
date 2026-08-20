@@ -63,6 +63,50 @@ void set_backlight_led()
   leds.show();
 }
 
+// Emulates a vintage lamp with a loose contact: briefly dims one random
+// backlight LED, then restores it, at random intervals. Call every loop().
+const unsigned char LED_FLICKER_DIM_DIVISOR = 6; // How much dimmer the flickering LED gets
+
+// Bounds (in ms) for the two random() calls in flicker_backlight_led(), persisted
+// to EEPROM and settable via the web UI. Defaults: wait 2-8s between flickers,
+// each flicker lasting 50-250ms.
+int led_flicker_min_interval = 2000; // Shortest wait before the next flicker starts
+int led_flicker_max_interval = 8000; // Longest wait before the next flicker starts
+int led_flicker_min_duration = 50;   // Shortest a flicker (dimmed period) lasts
+int led_flicker_max_duration = 250;  // Longest a flicker (dimmed period) lasts
+
+int led_flicker_index = -1;            // Currently-dimmed LED, or -1 if none
+unsigned long led_flicker_until = 0;   // millis() deadline to restore led_flicker_index
+unsigned long led_flicker_next_at = 0; // millis() deadline for the next flicker to start
+
+void flicker_backlight_led()
+{
+  unsigned long now = millis();
+
+  if (led_flicker_index >= 0) {
+    // A flicker is in progress; wait for it to run its course.
+    if ((long)(now - led_flicker_until) < 0) return;
+
+    // Restore the LED to its normal color and schedule the next flicker.
+    leds.setPixelColor(led_flicker_index, leds.Color(led_color.r, led_color.g, led_color.b));
+    leds.show();
+    led_flicker_index = -1;
+    // random() needs max > min; guard against a max <= min misconfiguration.
+    led_flicker_next_at = now + random(led_flicker_min_interval, max(led_flicker_max_interval, led_flicker_min_interval+1));
+    return;
+  }
+
+  // Not flickering; wait until the scheduled time to start the next one.
+  if ((long)(now - led_flicker_next_at) < 0) return;
+
+  // Dim a random backlight LED for a short moment.
+  led_flicker_index = LED_COUNT - LED_ORANGE_COUNT + random(LED_ORANGE_COUNT);
+  leds.setPixelColor(led_flicker_index, leds.Color(
+    led_color.r/LED_FLICKER_DIM_DIVISOR, led_color.g/LED_FLICKER_DIM_DIVISOR, led_color.b/LED_FLICKER_DIM_DIVISOR));
+  leds.show();
+  led_flicker_until = now + random(led_flicker_min_duration, max(led_flicker_max_duration, led_flicker_min_duration+1));
+}
+
 // Clock global configuration (persisted to EEPROM).
 char ntpServerName[80] = "fi.pool.ntp.org";
 signed char clock_tz = 2; // Timezone shift (could be negative)
@@ -122,6 +166,11 @@ const int eeprom_gauge_3_mode_addr = eeprom_led_brightness_addr + sizeof(led_bri
 // EEPROM address of the backlight LED color (3 bytes: r, g, b), placed right
 // after the gauge_3 display mode written by read/write_eeprom_data().
 const int eeprom_led_color_addr = eeprom_gauge_3_mode_addr + sizeof(gauge_3_mode);
+
+// EEPROM address of the 4 LED flicker timing bounds (int each: min/max
+// interval, then min/max duration), placed right after the backlight LED
+// color written by read/write_eeprom_data().
+const int eeprom_led_flicker_addr = eeprom_led_color_addr + 3;
 
 // Indicator LEDs, one per gauge_3 mode, showing which value gauge_3 currently displays.
 const int LED_GAUGE3_SECONDS = 0;
@@ -366,6 +415,19 @@ void read_eeprom_data()
   led_color.g = EEPROM.read(eeprom_led_color_addr+1);
   led_color.b = EEPROM.read(eeprom_led_color_addr+2);
 
+  int fmin_i, fmax_i, fmin_d, fmax_d;
+  EEPROM.get(eeprom_led_flicker_addr, fmin_i);
+  EEPROM.get(eeprom_led_flicker_addr+sizeof(fmin_i), fmax_i);
+  EEPROM.get(eeprom_led_flicker_addr+2*sizeof(fmin_i), fmin_d);
+  EEPROM.get(eeprom_led_flicker_addr+3*sizeof(fmin_i), fmax_d);
+
+  // Bounds must be positive and within a sane range; reject uninitialized
+  // (erased) EEPROM contents and keep the code defaults.
+  if (fmin_i>0 && fmin_i<=60000) led_flicker_min_interval = fmin_i;
+  if (fmax_i>0 && fmax_i<=60000) led_flicker_max_interval = fmax_i;
+  if (fmin_d>0 && fmin_d<=5000) led_flicker_min_duration = fmin_d;
+  if (fmax_d>0 && fmax_d<=5000) led_flicker_max_duration = fmax_d;
+
   EEPROM.commit();
 }
 
@@ -388,6 +450,11 @@ void write_eeprom_data()
   EEPROM.write(eeprom_led_color_addr, led_color.r);
   EEPROM.write(eeprom_led_color_addr+1, led_color.g);
   EEPROM.write(eeprom_led_color_addr+2, led_color.b);
+
+  EEPROM.put(eeprom_led_flicker_addr, led_flicker_min_interval);
+  EEPROM.put(eeprom_led_flicker_addr+sizeof(led_flicker_min_interval), led_flicker_max_interval);
+  EEPROM.put(eeprom_led_flicker_addr+2*sizeof(led_flicker_min_interval), led_flicker_min_duration);
+  EEPROM.put(eeprom_led_flicker_addr+3*sizeof(led_flicker_min_interval), led_flicker_max_duration);
 
   EEPROM.commit();
 }
@@ -489,6 +556,10 @@ void build()
     "LEDs",
     GP_MAKE_BOX(GP.LABEL("LED brightness (0-255):"); GP.NUMBER("led_brightness", "", led_brightness););
     GP_MAKE_BOX(GP.LABEL("LED color:"); GP.COLOR("led_color", led_color););
+    GP_MAKE_BOX(GP.LABEL("Flicker min interval (ms):"); GP.NUMBER("led_flicker_min_interval", "", led_flicker_min_interval););
+    GP_MAKE_BOX(GP.LABEL("Flicker max interval (ms):"); GP.NUMBER("led_flicker_max_interval", "", led_flicker_max_interval););
+    GP_MAKE_BOX(GP.LABEL("Flicker min duration (ms):"); GP.NUMBER("led_flicker_min_duration", "", led_flicker_min_duration););
+    GP_MAKE_BOX(GP.LABEL("Flicker max duration (ms):"); GP.NUMBER("led_flicker_max_duration", "", led_flicker_max_duration););
   );
 
   GP.SUBMIT("UPDATE");
@@ -577,6 +648,27 @@ void action(GyverPortal& p)
 
     led_color = ui.getColor("led_color");
 
+    // Read the new LED flicker timing bounds, and check them for sanity.
+    n = ui.getInt("led_flicker_min_interval");
+    if (n>0 && n<=60000) {
+      led_flicker_min_interval = n;
+    }
+
+    n = ui.getInt("led_flicker_max_interval");
+    if (n>0 && n<=60000) {
+      led_flicker_max_interval = n;
+    }
+
+    n = ui.getInt("led_flicker_min_duration");
+    if (n>0 && n<=5000) {
+      led_flicker_min_duration = n;
+    }
+
+    n = ui.getInt("led_flicker_max_duration");
+    if (n>0 && n<=5000) {
+      led_flicker_max_duration = n;
+    }
+
     n = ui.getInt("gauge_3_mode");
     if (n>=0 && n<=GAUGE3_RANDOM) {
       gauge_3_mode = n;
@@ -623,7 +715,7 @@ void setup()
 
   log_printf("Setup start\n");
 
-  EEPROM.begin(100);
+  EEPROM.begin(128); // Must be >= eeprom_led_flicker_addr + 4*sizeof(int) (last field used)
   read_eeprom_data();
 
   leds.begin();
@@ -724,6 +816,9 @@ void loop()
     gauge3_random_pick_and_apply();
   }
 
+  // Randomly flicker a backlight LED, like a vintage lamp with a loose contact.
+  flicker_backlight_led();
+
   // Read time and set the floating-point time values.
   tm *ttm = localtime(&tv.tv_sec);
   double s = (ttm->tm_sec%60)+double(tv.tv_usec)/1000000;
@@ -749,10 +844,10 @@ void loop()
       disp.set_value(gauge_3, s);
       break;
   }
-  delay(100);
+  delay(1);
 
   static int count = 0;
-  if (count++ == 100) {
+  if (count++ == 10000) {
     log_printf("Time: %f %f %f\n", h, m, s);
     read_sensors();
     count = 0;

@@ -14,6 +14,14 @@ time-of-day: `get_time_from_rtc()` reads the RTC at startup and seeds the ESP32'
 The sketch also drives 10 WS2812 addressable LEDs on pin `IO20` (`LED_PIN`) via `Adafruit_NeoPixel`,
 with `leds_off()`/`set_backlight_led()` helpers to switch them off or on at `led_brightness` (0-255)
 in `led_color` (a `GPcolor`, default orange), both persisted to EEPROM and settable via the web UI.
+`flicker_backlight_led()`, called every `loop()` iteration, emulates a vintage lamp with a loose
+contact by briefly dimming one random backlight LED (index 4-9) to `led_color/6` before restoring it,
+waiting a random interval before the next flicker. Both the flicker duration and the wait between
+flickers are configurable ranges (`led_flicker_min_duration`/`led_flicker_max_duration`, default
+50-250ms, and `led_flicker_min_interval`/`led_flicker_max_interval`, default 2000-8000ms), settable
+via the web UI's LEDs tab and persisted to EEPROM alongside the other LED settings. It never touches
+the gauge_3-mode indicator LEDs (0-3, see below), since those carry state rather than being purely
+decorative.
 
 The sketch also connects to WiFi (via `WiFiManager`, falling back to an on-device "GaugeClock"
 config AP if no saved credentials work) and, when connected, periodically syncs time from an NTP

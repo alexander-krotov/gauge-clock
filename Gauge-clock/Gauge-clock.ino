@@ -40,7 +40,10 @@ Adafruit_NeoPixel leds(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 // LED strip brightness (0-255), persisted to EEPROM and settable via the web UI.
 unsigned char led_brightness = 128;
 
-const int LED_ORANGE_COUNT = 6; // Number of LEDs lit by leds_on_orange()
+// Backlight LED color, persisted to EEPROM and settable via the web UI. Defaults to orange.
+GPcolor led_color(255, 80, 0);
+
+const int LED_ORANGE_COUNT = 6; // Number of LEDs lit by set_backlight_led()
 
 // Turn all LEDs off.
 void leds_off()
@@ -49,13 +52,13 @@ void leds_off()
   leds.show();
 }
 
-// Turn the first LED_ORANGE_COUNT LEDs on in orange, at led_brightness.
-void leds_on_orange()
+// Turn the first LED_ORANGE_COUNT LEDs on in led_color, at led_brightness.
+void set_backlight_led()
 {
   leds.setBrightness(led_brightness);
   leds.clear();
   for (int i = LED_COUNT-LED_ORANGE_COUNT; i < LED_COUNT; i++) {
-    leds.setPixelColor(i, leds.Color(255, 80, 0));
+    leds.setPixelColor(i, leds.Color(led_color.r, led_color.g, led_color.b));
   }
   leds.show();
 }
@@ -115,6 +118,10 @@ const int eeprom_led_brightness_addr = eeprom_correction_addr + 3*sizeof(gauge_c
 // EEPROM address of the gauge_3 display mode, placed right after the LED
 // brightness written by read/write_eeprom_data().
 const int eeprom_gauge_3_mode_addr = eeprom_led_brightness_addr + sizeof(led_brightness);
+
+// EEPROM address of the backlight LED color (3 bytes: r, g, b), placed right
+// after the gauge_3 display mode written by read/write_eeprom_data().
+const int eeprom_led_color_addr = eeprom_gauge_3_mode_addr + sizeof(gauge_3_mode);
 
 // Indicator LEDs, one per gauge_3 mode, showing which value gauge_3 currently displays.
 const int LED_GAUGE3_SECONDS = 0;
@@ -355,6 +362,10 @@ void read_eeprom_data()
   unsigned char m = EEPROM.read(eeprom_gauge_3_mode_addr);
   if (m<=GAUGE3_RANDOM) gauge_3_mode = m;
 
+  led_color.r = EEPROM.read(eeprom_led_color_addr);
+  led_color.g = EEPROM.read(eeprom_led_color_addr+1);
+  led_color.b = EEPROM.read(eeprom_led_color_addr+2);
+
   EEPROM.commit();
 }
 
@@ -373,6 +384,10 @@ void write_eeprom_data()
   EEPROM.write(eeprom_led_brightness_addr, led_brightness);
 
   EEPROM.write(eeprom_gauge_3_mode_addr, gauge_3_mode);
+
+  EEPROM.write(eeprom_led_color_addr, led_color.r);
+  EEPROM.write(eeprom_led_color_addr+1, led_color.g);
+  EEPROM.write(eeprom_led_color_addr+2, led_color.b);
 
   EEPROM.commit();
 }
@@ -473,6 +488,7 @@ void build()
   GP_MAKE_BLOCK_TAB(
     "LEDs",
     GP_MAKE_BOX(GP.LABEL("LED brightness (0-255):"); GP.NUMBER("led_brightness", "", led_brightness););
+    GP_MAKE_BOX(GP.LABEL("LED color:"); GP.COLOR("led_color", led_color););
   );
 
   GP.SUBMIT("UPDATE");
@@ -559,6 +575,8 @@ void action(GyverPortal& p)
       led_brightness = n;
     }
 
+    led_color = ui.getColor("led_color");
+
     n = ui.getInt("gauge_3_mode");
     if (n>=0 && n<=GAUGE3_RANDOM) {
       gauge_3_mode = n;
@@ -568,7 +586,7 @@ void action(GyverPortal& p)
     disp.set_correction(gauge_2, gauge_correction_2);
     disp.set_correction(gauge_3, gauge_correction_3);
 
-    leds_on_orange();
+    set_backlight_led();
     gauge3_apply_mode();
 
     // Save new settings to EEPROM
@@ -609,7 +627,7 @@ void setup()
   read_eeprom_data();
 
   leds.begin();
-  leds_on_orange();
+  set_backlight_led();
 
   // Set time from RTC
   get_time_from_rtc();

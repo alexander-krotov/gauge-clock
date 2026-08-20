@@ -12,8 +12,8 @@ time-of-day: `get_time_from_rtc()` reads the RTC at startup and seeds the ESP32'
 `settimeofday()`) that `loop()` reads from thereafter.
 
 The sketch also drives 10 WS2812 addressable LEDs on pin `IO20` (`LED_PIN`) via `Adafruit_NeoPixel`,
-with `leds_off()`/`leds_on_orange(brightness)` helpers to switch them off or on in orange at a given
-brightness (0-255).
+with `leds_off()`/`set_backlight_led()` helpers to switch them off or on at `led_brightness` (0-255)
+in `led_color` (a `GPcolor`, default orange), both persisted to EEPROM and settable via the web UI.
 
 The sketch also connects to WiFi (via `WiFiManager`, falling back to an on-device "GaugeClock"
 config AP if no saved credentials work) and, when connected, periodically syncs time from an NTP
@@ -35,7 +35,7 @@ what gauge_3 should actually show at any moment (the random submode, or `gauge_3
 not random), and both `set_gauge3_range()` and `leds_indicate_gauge3_mode()` key off it.
 `leds_indicate_gauge3_mode()` lights one of the first 4 WS2812 LEDs white (at `led_brightness`) to
 show which value gauge_3 is on: LED 0 = seconds, LED 1 = humidity, LED 2 = pressure, LED 3 =
-temperature, clearing the other three each call; it runs after `leds_on_orange()` (in `setup()` and
+temperature, clearing the other three each call; it runs after `set_backlight_led()` (in `setup()` and
 after a web UI settings update, via `gauge3_apply_mode()`) since that call clears the whole strip.
 
 The target is the ESP32 Arduino core specifically (not vanilla AVR Arduino): note the two-argument

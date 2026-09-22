@@ -8,30 +8,32 @@ An ESP32-based clock that displays time — and ambient conditions — on real a
 
 Three analog voltmeter gauges are driven by a 4-channel DAC to show hours, minutes, and seconds.
 The lowest gauge can also be switched to show temperature, humidity, barometric pressure, or cycle
-randomly through all of them, with a small WS2812 LED indicator showing which value it's currently
-displaying. Ten WS2812 LEDs backlight the gauges, with a configurable color/brightness and a
+randomly through all of them, with a small LED indicator showing which value it's currently
+displaying. Ten  LEDs backlight the gauges, with a configurable color/brightness and a
 vintage-lamp "flicker" effect that emulates a loose contact.
 
 Time comes from a DS3231 RTC, kept in sync over WiFi via NTP. Ambient readings come from an AHT20
 (temperature/humidity) and a BMP280 (temperature/pressure) sensor. A built-in web UI lets you
-configure everything — timezone, NTP server, LED color and brightness, flicker timing, and gauge_3's
-display mode — without reflashing the device.
+configure everything — timezone, NTP server, LED color and brightness, flicker timing, and lower gauges's
+display mode.
 
 ## Features
 
 - Analog gauge display of hours, minutes, and seconds via an MCP4728 DAC
-- Selectable 4th gauge: seconds, temperature, humidity, pressure, or random cycling
+- Selectable 3rd gauge mode: seconds, temperature, humidity, pressure, or random cycling
 - WS2812 LED backlighting with configurable color/brightness and a vintage-lamp flicker effect
 - WiFi provisioning via a captive config portal (no hardcoded credentials)
 - Automatic time sync over NTP, backed up to a DS3231 RTC for power-loss resilience
 - Web-based configuration UI (no reflashing needed to change settings)
 - All settings persisted to EEPROM
 
+Most of the code was borrowed from my earlier clock projects, and modified using Claude code.
+
 ## Hardware
 
 - ESP32 dev board
 - MCP4728 4-channel DAC (drives the gauge needles)
-- 3–4 analog voltmeter gauges
+- 3 analog voltmeter gauges
 - DS3231 real-time clock module
 - AHT20 temperature/humidity sensor
 - BMP280 barometric pressure sensor

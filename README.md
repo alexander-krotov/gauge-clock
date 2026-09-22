@@ -74,4 +74,4 @@ Once connected, the device is reachable at `gauge-clock.local` for configuration
 
 ## License
 
-No license specified yet.
+BSD 2-Clause License. See [LICENSE](LICENSE) for details.

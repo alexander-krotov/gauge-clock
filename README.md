@@ -42,7 +42,7 @@ Most of the code was borrowed from my earlier clock projects, and modified using
 
 ### Schematics
 
-*Coming soon — schematics will be published on [oswh.com](https://oswh.com).*
+https://oshwlab.com/alexander.krotov/project_fjxsaxzh
 
 ## Dependencies
 
